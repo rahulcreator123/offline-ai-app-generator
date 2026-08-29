@@ -10,7 +10,8 @@ import {
   Check, 
   Database,
   Radio,
-  Server
+  Server,
+  FolderOpen
 } from 'lucide-react';
 import { AppSettings, AIProvider } from '../types/builder';
 
@@ -451,6 +452,44 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* Tab 5: Runtime & Paths */}
           {activeTab === 'runtime' && (
             <div className="space-y-4">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs text-neutral-400 uppercase font-bold tracking-wide flex items-center gap-1.5">
+                    <FolderOpen className="w-3.5 h-3.5 text-[#FFD700]" />
+                    <span>Project Workspace Directory (Absolute / Local Path)</span>
+                  </label>
+                  {formData.runtime.projectDirectory !== './projects' && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setFormData({
+                          ...formData,
+                          runtime: { ...formData.runtime, projectDirectory: './projects' },
+                        })
+                      }
+                      className="text-[10px] text-[#FFD700] hover:underline font-mono cursor-pointer"
+                    >
+                      Reset to ./projects
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  placeholder="e.g. C:\Users\Username\Projects or /home/user/my-apps or ./projects"
+                  value={formData.runtime.projectDirectory}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      runtime: { ...formData.runtime, projectDirectory: e.target.value },
+                    })
+                  }
+                  className="w-full bg-[#0A0A0A] border border-[#333333] rounded-lg px-3 py-2 text-xs text-white font-mono placeholder:text-neutral-600 focus:outline-none focus:border-[#FFD700] transition"
+                />
+                <p className="mt-1 text-[11px] text-neutral-400 font-medium">
+                  Specify an absolute directory path on your local machine for saving generated projects and disk sync (defaults to <code className="text-[#FFD700] font-mono text-[10px]">./projects</code>).
+                </p>
+              </div>
+
               <div>
                 <label className="block text-xs text-neutral-400 mb-1 uppercase font-bold tracking-wide">Node.js Binary Path</label>
                 <input

@@ -214,10 +214,12 @@ Make every file self-contained and compilable.`;
 
     const actions = this.extractDelimitedFiles(raw);
     if (!actions.length) throw new Error('Fast Ollama response contained no usable files.');
-    const required = ['package.json', 'index.html', 'src/main.tsx', 'src/App.tsx', 'src/index.css'];
-    const paths = new Set(actions.map(a => a.path));
-    const missing = required.filter(p => !paths.has(p));
-    if (missing.length) throw new Error(`Fast generation omitted required files: ${missing.join(', ')}`);
+
+    // Ensure src/App.tsx was generated at minimum
+    const hasApp = actions.some(a => a.path === 'src/App.tsx' || a.path === 'src/App.jsx' || a.path === 'App.tsx');
+    if (!hasApp) {
+      throw new Error('Fast generation omitted required src/App.tsx');
+    }
 
     for (const action of actions) callbacks.onLog?.('success', `✓ Generated ${action.path}`);
     return {

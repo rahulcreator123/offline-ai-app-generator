@@ -91,8 +91,8 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({
 
           {planExpanded && (
             <div className="mt-2.5 space-y-1.5 max-h-48 overflow-y-auto pr-1">
-              {currentPlan.map((step) => (
-                <div key={step.id} className="flex items-center gap-2 text-xs">
+              {currentPlan.map((step, sIdx) => (
+                <div key={step.id ? `${step.id}_${sIdx}` : `step_${sIdx}`} className="flex items-center gap-2 text-xs">
                   {step.status === 'completed' ? (
                     <CheckCircle2 className="w-3.5 h-3.5 text-[#FFD700] shrink-0" />
                   ) : step.status === 'in-progress' ? (
@@ -130,9 +130,9 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({
           </div>
         )}
 
-        {messages.map((msg) => (
+        {messages.map((msg, index) => (
           <div
-            key={msg.id}
+            key={msg.id ? `${msg.id}_${index}` : `msg_${index}`}
             className={`flex flex-col space-y-1.5 ${
               msg.role === 'user' ? 'items-end' : 'items-start'
             }`}

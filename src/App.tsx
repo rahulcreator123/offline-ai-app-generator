@@ -18,7 +18,7 @@ import { TEMPLATES } from './services/templates';
 
 const DEFAULT_SETTINGS: AppSettings = {
   ai: {
-    provider: 'gemini',
+    provider: 'ollama',
     model: 'gemini-2.5-flash',
     temperature: 0.7,
     contextSize: 8192,

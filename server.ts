@@ -286,10 +286,17 @@ async function waitForViteApp(url: string, timeoutMs = 15000): Promise<{ ok: boo
         const entryResponse = await fetch(entry, { signal: entryController.signal });
         const entryText = await entryResponse.text();
         clearTimeout(entryTimer);
-        if (entryResponse.status < 500 && !/Internal Server Error|Failed to resolve import|Could not resolve/i.test(entryText)) {
+        let isErr = entryResponse.status >= 500 || /Internal Server Error|Failed to resolve import|Could not resolve/i.test(entryText);
+        if (!isErr) {
           return { ok: true };
         }
-        lastError = `Entry module failed (HTTP ${entryResponse.status}): ${entryText.slice(-3500)}`;
+        // If the entry failure contains sourcemap or base64 junk, clean it up
+        let cleanDiag = entryText;
+        if (cleanDiag.length > 500) {
+          const lines = cleanDiag.split('\n').filter(l => !l.startsWith('//# sourceMappingURL=') && !l.startsWith('{"version":3,'));
+          cleanDiag = lines.join('\n').slice(0, 500);
+        }
+        lastError = `Entry module failed (HTTP ${entryResponse.status}): ${cleanDiag || 'Module resolution error'}`;
       }
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);

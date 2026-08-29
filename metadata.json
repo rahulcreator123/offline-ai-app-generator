@@ -1,3 +1,8 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:ee29e5b9f8add106aba8c8400a2b6f283bdf200abb310b453c915d2256af7966
-size 393
+{
+  "name": "AI Studio Local App Builder V5 - Any App Large App",
+  "description": "A developer-grade local AI application builder and workspace with Ollama/Gemini providers, agent planning, live code editor, automatic error recovery, and interactive preview.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

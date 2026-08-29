@@ -1,3 +1,8 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:db691f14fcf678985362a42c6aedb581e42cd6bb99962ce1b44aea460fb2a4df
-size 73
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example

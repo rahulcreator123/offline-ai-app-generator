@@ -36,7 +36,7 @@ export const LivePreview: React.FC<LivePreviewProps> = ({
   autoFixEnabled = true,
   onToggleAutoFix,
 }) => {
-  const [previewMode, setPreviewMode] = useState<'sandbox' | 'devserver'>('devserver');
+  const [previewMode, setPreviewMode] = useState<'sandbox' | 'devserver'>('sandbox');
   const [viewport, setViewport] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [compiledHtml, setCompiledHtml] = useState<string>('');
   const [refreshKey, setRefreshKey] = useState(0);

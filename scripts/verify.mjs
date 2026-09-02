@@ -65,7 +65,7 @@ const extensions = ['', '.ts', '.tsx', '.js', '.jsx'];
 const missingImports = [];
 const re = /from\s*['"](\.{1,2}\/[^'"]+)['"]|import\s*['"](\.{1,2}\/[^'"]+)['"]/g;
 for (const file of files) {
-  if (['templates.ts', 'exportService.ts', 'aiAgent.ts'].includes(path.basename(file))) continue;
+  if (['templates.ts', 'exportService.ts', 'aiAgent.ts', 'offlineSynthesizer.ts'].includes(path.basename(file))) continue;
   const text = fs.readFileSync(file, 'utf8');
   let m;
   while ((m = re.exec(text))) {

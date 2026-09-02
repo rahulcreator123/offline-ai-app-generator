@@ -11,7 +11,11 @@ import {
   Layers, 
   Radio,
   FolderOpen,
-  HelpCircle
+  HelpCircle,
+  CheckCircle2,
+  RefreshCw,
+  HardDrive,
+  AlertCircle
 } from 'lucide-react';
 import { Project, AppSettings } from '../types/builder';
 
@@ -19,6 +23,9 @@ interface HeaderProps {
   project: Project | null;
   settings: AppSettings;
   activeMode: 'builder' | 'studio';
+  syncStatus?: 'synced' | 'syncing' | 'offline' | 'error';
+  lastSyncTime?: string | null;
+  onManualSync?: () => void;
   onSelectMode: (mode: 'builder' | 'studio') => void;
   onOpenSettings: () => void;
   onOpenSnapshots: () => void;
@@ -32,6 +39,9 @@ export const Header: React.FC<HeaderProps> = ({
   project,
   settings,
   activeMode,
+  syncStatus = 'synced',
+  lastSyncTime,
+  onManualSync,
   onSelectMode,
   onOpenSettings,
   onOpenSnapshots,
@@ -120,6 +130,51 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="flex items-center gap-2">
         {project && (
           <>
+            {/* Disk Workspace Sync Status */}
+            <button
+              onClick={onManualSync}
+              title={
+                syncStatus === 'synced'
+                  ? `All project files synced to disk workspace (projects/${project.id}) at ${lastSyncTime || 'just now'}. Click to force sync.`
+                  : syncStatus === 'syncing'
+                  ? 'Synchronizing project files to local disk...'
+                  : syncStatus === 'offline'
+                  ? 'Running offline (project files cached locally in browser). Click to retry syncing to disk.'
+                  : 'Disk synchronization error. Click to retry.'
+              }
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono font-bold tracking-wider border transition cursor-pointer ${
+                syncStatus === 'synced'
+                  ? 'bg-emerald-950/40 text-emerald-400 border-emerald-500/30 hover:bg-emerald-900/40'
+                  : syncStatus === 'syncing'
+                  ? 'bg-amber-950/40 text-amber-300 border-amber-500/40 hover:bg-amber-900/40 animate-pulse'
+                  : syncStatus === 'offline'
+                  ? 'bg-neutral-900 text-neutral-300 border-neutral-700 hover:bg-neutral-800'
+                  : 'bg-rose-950/40 text-rose-300 border-rose-500/40 hover:bg-rose-900/40'
+              }`}
+            >
+              {syncStatus === 'syncing' ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                  <span className="hidden sm:inline">Syncing...</span>
+                </>
+              ) : syncStatus === 'synced' ? (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="hidden sm:inline">Disk Synced</span>
+                </>
+              ) : syncStatus === 'offline' ? (
+                <>
+                  <HardDrive className="w-3.5 h-3.5 text-[#FFD700]" />
+                  <span className="hidden sm:inline">Offline Cache</span>
+                </>
+              ) : (
+                <>
+                  <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+                  <span className="hidden sm:inline">Sync Error</span>
+                </>
+              )}
+            </button>
+
             {/* Dev Server Indicator */}
             <button
               onClick={onToggleDevServer}

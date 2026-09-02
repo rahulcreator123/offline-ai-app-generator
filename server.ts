@@ -6,6 +6,7 @@ import net from "net";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { OfflineSynthesizer } from "./src/services/offlineSynthesizer";
 
 dotenv.config();
 
@@ -20,8 +21,9 @@ if (!fs.existsSync(WORKSPACE_BASE)) {
 // Security Helper: Ensure target paths stay strictly inside designated project directory within projects/
 function sanitizeProjectPath(relativePath: string, baseDir: string): string | null {
   if (!relativePath || !baseDir) return null;
-  const normalizedInput = String(relativePath).replace(/\\/g, "/");
-  if (path.isAbsolute(normalizedInput) || normalizedInput.split("/").includes("..")) return null;
+  // Normalize slashes and strip any leading slashes or dot-slashes so paths like /src/App.tsx, ./src/App.tsx, or \src\App.tsx work cleanly
+  const normalizedInput = String(relativePath).replace(/\\/g, "/").replace(/^(\.\/|\/)+/, "");
+  if (!normalizedInput || normalizedInput.split("/").includes("..")) return null;
   const cleanRelative = path.normalize(normalizedInput);
   const resolved = path.resolve(baseDir, cleanRelative);
   const rel = path.relative(baseDir, resolved);
@@ -34,6 +36,53 @@ function sanitizeProjectPath(relativePath: string, baseDir: string): string | nu
     return null; // Path escapes workspace boundary - rejected
   }
   return resolved;
+}
+
+// Parse ===FILE:path=== and ===END_FILE=== delimiters from LLM responses
+function parseDelimitedFileActions(text: string): Array<{ action: 'create_file'; path: string; content: string }> {
+  const actions: Array<{ action: 'create_file'; path: string; content: string }> = [];
+  if (!text) return actions;
+  const regex = /===FILE:([^=\n]+)===\s*([\s\S]*?)(?=\s*===END_FILE===|$)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    const rawPath = match[1].trim().replace(/\\/g, '/').replace(/^(\.\/|\/)+/, '');
+    if (!rawPath || rawPath.includes('..')) continue;
+    actions.push({
+      action: 'create_file',
+      path: rawPath,
+      content: match[2].trim(),
+    });
+  }
+  return actions;
+}
+
+// Write generated project action files to disk in projects/<projectId>
+function writeProjectActionsToDisk(projectId: string, actions: Array<{ action?: string; path?: string; content?: string }>) {
+  if (!projectId || !Array.isArray(actions)) return;
+  const safeId = String(projectId).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const projectDir = path.join(WORKSPACE_BASE, safeId);
+  if (!fs.existsSync(projectDir)) {
+    fs.mkdirSync(projectDir, { recursive: true });
+  }
+  let count = 0;
+  for (const act of actions) {
+    if ((act.action === 'create_file' || act.action === 'update_file') && act.path && typeof act.content === 'string') {
+      const targetPath = sanitizeProjectPath(act.path, projectDir);
+      if (targetPath) {
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        fs.writeFileSync(targetPath, act.content, 'utf8');
+        count++;
+      }
+    } else if (act.action === 'delete_file' && act.path) {
+      const targetPath = sanitizeProjectPath(act.path, projectDir);
+      if (targetPath && fs.existsSync(targetPath)) {
+        fs.unlinkSync(targetPath);
+      }
+    }
+  }
+  if (count > 0) {
+    pushAgentLog('success', `[Disk] Saved ${count} generated files to projects/${safeId}`);
+  }
 }
 
 // In-memory buffer for real agent and terminal logs
@@ -764,11 +813,11 @@ async function startServer() {
   // 4. REAL FILESYSTEM & WORKSPACE SYNCHRONIZER (Phase 8 & 10)
   // =========================================================================
   // POST /api/workspace/sync (Syncs full in-memory Project JSON structure to real disk)
-  app.post("/api/workspace/sync", (req, res) => {
+  const handleWorkspaceSync = (req: express.Request, res: express.Response) => {
     try {
-      const { projectId = "default", files = {} } = req.body;
+      const { projectId = "default", files = {}, metadata } = req.body;
       const safeProjectId = String(projectId).replace(/[^a-zA-Z0-9._-]/g, "_");
-    const projectDir = path.join(WORKSPACE_BASE, safeProjectId);
+      const projectDir = path.join(WORKSPACE_BASE, safeProjectId);
 
       if (!fs.existsSync(projectDir)) {
         fs.mkdirSync(projectDir, { recursive: true });
@@ -788,12 +837,117 @@ async function startServer() {
         writtenCount++;
       }
 
+      // If metadata is provided (or part of project state), save it to .project-metadata.json
+      if (metadata && typeof metadata === "object") {
+        const metaPath = path.join(projectDir, ".project-metadata.json");
+        try {
+          fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2), "utf8");
+        } catch {}
+      }
+
       pushAgentLog("success", `[Workspace Sync] Synchronized ${writtenCount} files to disk in projects/${projectId}`);
-      res.json({ success: true, writtenFiles: writtenCount, projectDir });
+      res.json({
+        success: true,
+        writtenFiles: writtenCount,
+        projectDir,
+        syncedAt: new Date().toISOString(),
+      });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
-  });
+  };
+  app.post("/api/workspace/sync", handleWorkspaceSync);
+  app.post("/workspace/sync", handleWorkspaceSync);
+
+  // GET /api/workspace/projects (List all real projects and their files on disk)
+  const handleGetWorkspaceProjects = (_req: express.Request, res: express.Response) => {
+    try {
+      if (!fs.existsSync(WORKSPACE_BASE)) {
+        fs.mkdirSync(WORKSPACE_BASE, { recursive: true });
+      }
+      const entries = fs.readdirSync(WORKSPACE_BASE, { withFileTypes: true });
+      const projects: any[] = [];
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const projectId = entry.name;
+        const projectDir = path.join(WORKSPACE_BASE, projectId);
+
+        // Scan files inside this project
+        const files: Record<string, { path: string; content: string; language: string }> = {};
+        function scanProject(dir: string) {
+          const items = fs.readdirSync(dir, { withFileTypes: true });
+          for (const item of items) {
+            if (item.name === "node_modules" || item.name === ".git" || item.name === "dist") continue;
+            const fullPath = path.join(dir, item.name);
+            if (item.isDirectory()) {
+              scanProject(fullPath);
+            } else if (item.isFile() && item.name !== ".project-metadata.json") {
+              const rel = path.relative(projectDir, fullPath).replace(/\\/g, "/");
+              try {
+                const content = fs.readFileSync(fullPath, "utf8");
+                const ext = rel.split(".").pop() || "";
+                let language = "typescript";
+                if (ext === "tsx" || ext === "jsx") language = "tsx";
+                else if (ext === "json") language = "json";
+                else if (ext === "css") language = "css";
+                else if (ext === "html") language = "html";
+                else if (ext === "sql") language = "sql";
+                else if (ext === "md") language = "markdown";
+                files[rel] = { path: rel, content, language };
+              } catch {}
+            }
+          }
+        }
+
+        try {
+          scanProject(projectDir);
+        } catch {}
+
+        if (Object.keys(files).length === 0) continue;
+
+        let meta: any = {};
+        const metaFile = path.join(projectDir, ".project-metadata.json");
+        if (fs.existsSync(metaFile)) {
+          try {
+            meta = JSON.parse(fs.readFileSync(metaFile, "utf8"));
+          } catch {}
+        }
+
+        let pkgName = projectId;
+        const pkgFile = path.join(projectDir, "package.json");
+        if (fs.existsSync(pkgFile)) {
+          try {
+            const pkg = JSON.parse(fs.readFileSync(pkgFile, "utf8"));
+            if (pkg.name) pkgName = pkg.name;
+          } catch {}
+        }
+
+        projects.push({
+          id: projectId,
+          name: meta.name || pkgName,
+          description: meta.description || `Local Project in projects/${projectId}`,
+          createdAt: meta.createdAt || new Date().toISOString(),
+          updatedAt: meta.updatedAt || new Date().toISOString(),
+          files,
+          activeFilePath: meta.activeFilePath && files[meta.activeFilePath] ? meta.activeFilePath : (files["src/App.tsx"] ? "src/App.tsx" : Object.keys(files)[0] || ""),
+          openTabs: Array.isArray(meta.openTabs) && meta.openTabs.length > 0 ? meta.openTabs.filter((t: string) => files[t]) : (files["src/App.tsx"] ? ["src/App.tsx"] : [Object.keys(files)[0]].filter(Boolean)),
+          messages: Array.isArray(meta.messages) ? meta.messages : [],
+          snapshots: Array.isArray(meta.snapshots) ? meta.snapshots : [],
+          currentPlan: Array.isArray(meta.currentPlan) ? meta.currentPlan : [],
+          terminalLogs: [],
+          devServerStatus: "stopped",
+          devUrl: `http://localhost:5173`,
+        });
+      }
+
+      res.json({ success: true, projects, total: projects.length });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  };
+  app.get("/api/workspace/projects", handleGetWorkspaceProjects);
+  app.get("/workspace/projects", handleGetWorkspaceProjects);
 
   // GET /project/files (Real directory scan)
   const handleGetFiles = (req: express.Request, res: express.Response) => {
@@ -946,14 +1100,29 @@ async function startServer() {
         return res.status(400).json({ error: "Prompt is required" });
       }
 
-      // Ollama route
-      if (provider === "ollama" || !process.env.GEMINI_API_KEY) {
+      const targetProjectId = req.body.projectId || projectContext?.id || (typeof projectContext === "object" && projectContext?.currentProject?.id) || null;
+
+      // Direct offline / demo route
+      if (provider === "demo" || provider === "offline") {
+        const offlineSchema = OfflineSynthesizer.generateOfflineProject(prompt);
+        if (targetProjectId) {
+          writeProjectActionsToDisk(targetProjectId, offlineSchema.actions);
+        }
+        return res.json({
+          success: true,
+          data: offlineSchema,
+          model: "offline-synthesizer",
+        });
+      }
+
+      // Ollama route (Local / Offline)
+      if (provider === "ollama") {
         const ollamaEndpoint = req.body.ollamaEndpoint || "http://localhost:11434";
         const ollamaModel = req.body.ollamaModel || "rahul-ai:latest";
 
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 55000);
+          const timeoutId = setTimeout(() => controller.abort(), 3500);
 
           const response = await fetch(`${ollamaEndpoint}/api/generate`, {
             method: "POST",
@@ -976,23 +1145,51 @@ async function startServer() {
 
           if (response.ok) {
             const data = await response.json();
-            let parsed = {};
+            let parsed: any = {};
             try {
               parsed = JSON.parse(data.response);
             } catch {
-              parsed = { summary: data.response, actions: [] };
+              const delimActions = parseDelimitedFileActions(data.response);
+              parsed = {
+                plan: ["Synthesize local components", "Write files to disk", "Prepare live preview"],
+                summary: "Generated project files via Ollama",
+                actions: delimActions,
+              };
             }
-            return res.json({ success: true, data: parsed, raw: data.response, model: ollamaModel });
+            if (!parsed.actions || parsed.actions.length === 0) {
+              const delimActions = parseDelimitedFileActions(data.response);
+              if (delimActions.length > 0) {
+                parsed.actions = delimActions;
+              }
+            }
+            if (parsed.actions && parsed.actions.length > 0) {
+              if (targetProjectId) {
+                writeProjectActionsToDisk(targetProjectId, parsed.actions);
+              }
+              return res.json({ success: true, data: parsed, raw: data.response, model: ollamaModel });
+            }
           }
         } catch (ollamaErr: any) {
-          pushAgentLog("warn", `Local Ollama unavailable (${ollamaErr.message}).`);
+          pushAgentLog("warn", `Local Ollama unavailable (${ollamaErr.message}). Using built-in offline generator.`);
         }
+
+        // Seamless local fallback for Ollama mode:
+        const offlineSchema = OfflineSynthesizer.generateOfflineProject(prompt);
+        if (targetProjectId) {
+          writeProjectActionsToDisk(targetProjectId, offlineSchema.actions);
+        }
+        return res.json({
+          success: true,
+          data: offlineSchema,
+          model: "offline-synthesizer",
+        });
       }
 
       // Gemini 3.7 Flash Cloud Fallback (without deprecated temperature parameter)
       if (process.env.GEMINI_API_KEY) {
-        const ai = getGeminiClient();
-        const combinedInstruction = `
+        try {
+          const ai = getGeminiClient();
+          const combinedInstruction = `
 You are an expert AI software engineer running inside Local AI App Builder.
 CRITICAL PROTOCOL:
 You MUST respond with valid JSON adhering to:
@@ -1014,28 +1211,39 @@ You MUST respond with valid JSON adhering to:
 }
 ${isErrorFix ? "AUTOMATIC ERROR RECOVERY: Diagnose the error and return corrected files." : ""}
 `;
-        const result = await callGeminiWithFallback(
-          ai,
-          prompt,
-          combinedInstruction,
-          projectContext,
-          Boolean(isErrorFix)
-        );
+          const result = await callGeminiWithFallback(
+            ai,
+            prompt,
+            combinedInstruction,
+            projectContext,
+            Boolean(isErrorFix)
+          );
 
-        return res.json({
-          success: true,
-          data: result.data,
-          model: result.model,
-        });
+          if (result?.data?.actions && result.data.actions.length > 0) {
+            if (targetProjectId) {
+              writeProjectActionsToDisk(targetProjectId, result.data.actions);
+            }
+            return res.json({
+              success: true,
+              data: result.data,
+              model: result.model,
+            });
+          }
+        } catch (geminiErr: any) {
+          pushAgentLog("warn", `Gemini API call failed (${geminiErr.message}). Falling back to offline synthesizer.`);
+        }
       }
 
+      // Built-in resilient offline synthesizer
+      // Generates complete workspace files and creates folder & files on disk
+      const offlineSchema = OfflineSynthesizer.generateOfflineProject(prompt);
+      if (targetProjectId) {
+        writeProjectActionsToDisk(targetProjectId, offlineSchema.actions);
+      }
       return res.json({
         success: true,
-        data: {
-          plan: ["Synthesize offline component", "Mount on workspace"],
-          summary: "Generated component offline using local engine",
-          actions: [],
-        },
+        data: offlineSchema,
+        model: "offline-synthesizer",
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message });

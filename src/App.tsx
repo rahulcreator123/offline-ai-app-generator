@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AppSettings, Project, ProjectFile, Snapshot, BuildLog, SecurityApprovalRequest } from './types/builder';
 import { Header } from './components/Header';
 import { LandingScreen } from './components/LandingScreen';
@@ -298,6 +298,10 @@ export default function App() {
     } catch {}
   }, [recentProjects]);
 
+  const [syncStatus, setSyncStatus] = useState<'synced' | 'syncing' | 'offline' | 'error'>('synced');
+  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  const syncTimerRef = useRef<any>(null);
+
   // Save settings to localStorage
   const handleSaveSettings = (newSettings: AppSettings) => {
     setSettings(newSettings);
@@ -322,6 +326,89 @@ export default function App() {
     });
   }, []);
 
+  // Sync project to disk workspace (projects/{projectId})
+  const syncProjectToDisk = useCallback(async (project: Project, notify = false): Promise<boolean> => {
+    if (!project || Object.keys(project.files).length === 0) return false;
+    setSyncStatus('syncing');
+    try {
+      const res = await fetch('/api/workspace/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: project.id,
+          files: project.files,
+          metadata: {
+            id: project.id,
+            name: project.name,
+            description: project.description,
+            updatedAt: new Date().toISOString(),
+            activeFilePath: project.activeFilePath,
+            openTabs: project.openTabs,
+          },
+        }),
+      });
+      if (res.ok) {
+        setSyncStatus('synced');
+        const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        setLastSyncTime(timeStr);
+        if (notify) {
+          handleAddLog('success', `[Disk Sync] Synchronized project files to projects/${project.id} at ${timeStr}`);
+        }
+        return true;
+      } else {
+        setSyncStatus('error');
+        if (notify) {
+          handleAddLog('warn', `[Disk Sync] Sync returned status ${res.status}`);
+        }
+        return false;
+      }
+    } catch {
+      // In offline mode (e.g. companion/server disconnected), project is preserved in browser storage
+      setSyncStatus('offline');
+      if (notify) {
+        handleAddLog('info', `[Offline Storage] Project state safely preserved in browser offline cache.`);
+      }
+      return false;
+    }
+  }, [handleAddLog]);
+
+  // Debounced auto-sync whenever current project's files change
+  useEffect(() => {
+    if (!currentProject || Object.keys(currentProject.files).length === 0) return;
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(() => {
+      syncProjectToDisk(currentProject);
+    }, 450);
+    return () => {
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    };
+  }, [currentProject?.files, currentProject?.id, syncProjectToDisk]);
+
+  // Hydrate projects from real disk workspace on startup
+  useEffect(() => {
+    fetch('/api/workspace/projects')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.success && Array.isArray(data.projects) && data.projects.length > 0) {
+          setRecentProjects((existing) => {
+            const map = new Map<string, Project>();
+            // Disk projects take precedence
+            for (const p of data.projects) {
+              map.set(p.id, p);
+            }
+            // Retain any existing browser projects
+            for (const p of existing) {
+              if (!map.has(p.id)) {
+                map.set(p.id, p);
+              }
+            }
+            return Array.from(map.values());
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Update project in recentProjects when currentProject changes
   const updateProject = useCallback((updater: (prev: Project) => Project) => {
     setCurrentProject((prev) => {
@@ -341,33 +428,48 @@ export default function App() {
   };
 
   // Handler: Create new file
-  const handleCreateFile = (filePath: string) => {
+  const handleCreateFile = async (filePath: string) => {
+    const ext = filePath.split('.').pop() || '';
+    let language: ProjectFile['language'] = 'typescript';
+    if (ext === 'tsx') language = 'tsx';
+    else if (ext === 'jsx') language = 'jsx';
+    else if (ext === 'json') language = 'json';
+    else if (ext === 'css') language = 'css';
+    else if (ext === 'html') language = 'html';
+    else if (ext === 'md') language = 'markdown';
+    else if (ext === 'sql') language = 'sql';
+
+    const newFile: ProjectFile = {
+      path: filePath,
+      language,
+      content: ext === 'json' ? '{\n  \n}\n' : '// ' + filePath + '\n',
+    };
+
     updateProject((prev) => {
-      const ext = filePath.split('.').pop() || '';
-      let language: ProjectFile['language'] = 'typescript';
-      if (ext === 'tsx') language = 'tsx';
-      else if (ext === 'jsx') language = 'jsx';
-      else if (ext === 'json') language = 'json';
-      else if (ext === 'css') language = 'css';
-      else if (ext === 'html') language = 'html';
-      else if (ext === 'md') language = 'markdown';
-      else if (ext === 'sql') language = 'sql';
-
-      const newFile: ProjectFile = {
-        path: filePath,
-        language,
-        content: ext === 'json' ? '{\n  \n}\n' : '// ' + filePath + '\n',
-      };
-
       const files = { ...prev.files, [filePath]: newFile };
       const tabs = prev.openTabs.includes(filePath) ? prev.openTabs : [...prev.openTabs, filePath];
       return { ...prev, files, activeFilePath: filePath, openTabs: tabs };
     });
+
+    if (currentProject) {
+      try {
+        await fetch('/api/project/file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: filePath,
+            content: newFile.content,
+            projectId: currentProject.id,
+          }),
+        });
+      } catch {}
+    }
+
     handleAddLog('info', `Created file: ${filePath}`);
   };
 
   // Handler: Delete file
-  const handleDeleteFile = (filePath: string) => {
+  const handleDeleteFile = async (filePath: string) => {
     updateProject((prev) => {
       const files = { ...prev.files };
       delete files[filePath];
@@ -375,6 +477,15 @@ export default function App() {
       const activeFilePath = prev.activeFilePath === filePath ? tabs[0] || '' : prev.activeFilePath;
       return { ...prev, files, openTabs: tabs, activeFilePath };
     });
+
+    if (currentProject) {
+      try {
+        await fetch(`/api/project/file?path=${encodeURIComponent(filePath)}&projectId=${encodeURIComponent(currentProject.id)}`, {
+          method: 'DELETE',
+        });
+      } catch {}
+    }
+
     handleAddLog('warn', `Deleted file: ${filePath}`);
   };
 
@@ -406,10 +517,12 @@ export default function App() {
     });
   };
 
-  const handleSaveFile = (filePath: string) => {
+  const handleSaveFile = async (filePath: string) => {
+    let savedContent = '';
     updateProject((prev) => {
       const existing = prev.files[filePath];
       if (!existing) return prev;
+      savedContent = existing.content;
       return {
         ...prev,
         files: {
@@ -418,6 +531,21 @@ export default function App() {
         },
       };
     });
+
+    if (currentProject && savedContent !== undefined) {
+      try {
+        await fetch('/api/project/file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: filePath,
+            content: savedContent,
+            projectId: currentProject.id,
+          }),
+        });
+      } catch {}
+    }
+
     handleAddLog('success', `Saved ${filePath}`);
   };
 
@@ -431,6 +559,18 @@ export default function App() {
       targetProject = createInitialProject(appName, prompt);
       setCurrentProject(targetProject);
       setRecentProjects((all) => [targetProject!, ...all]);
+
+      // Immediately write initial project folder and files to disk
+      try {
+        await fetch('/api/workspace/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectId: targetProject.id,
+            files: targetProject.files,
+          }),
+        });
+      } catch {}
     }
 
     setIsGenerating(true);
@@ -614,6 +754,12 @@ export default function App() {
     if (currentProject?.id === proj.id) {
       setCurrentProject(null);
     }
+    fetch('/api/project/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: proj.id }),
+    }).catch(() => {});
+    handleAddLog('warn', `Deleted project: ${proj.name}`);
   };
 
   // Handler: Import project JSON
@@ -674,6 +820,13 @@ export default function App() {
         project={currentProject}
         settings={settings}
         activeMode={activeMode}
+        syncStatus={syncStatus}
+        lastSyncTime={lastSyncTime}
+        onManualSync={() => {
+          if (currentProject) {
+            syncProjectToDisk(currentProject, true);
+          }
+        }}
         onSelectMode={setActiveMode}
         onOpenSettings={() => setShowSettings(true)}
         onOpenSnapshots={() => setShowSnapshots(true)}
